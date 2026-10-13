@@ -1,0 +1,128 @@
+# Manager Library — local environment (empty database engine + API + frontend + public page).
+#
+# One command:  docker compose up -d --build
+#
+# Rules this file follows:
+#   * No secret has a default. Every secret comes from the untracked `.env` (see `.env.example`);
+#     a missing one stops `docker compose` with an explicit message (constitution, Article IX).
+#   * The database starts EMPTY. No schema is created here; the API owns it through its
+#     migrations (constitution, Article V / ADR-001).
+
+name: manager-library
+
+services:
+  db:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:?Set POSTGRES_DB in .env}
+      POSTGRES_USER: ${POSTGRES_USER:?Set POSTGRES_USER in .env}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+      TZ: UTC
+      PGTZ: UTC
+    ports:
+      # Bound to localhost only: the engine is not exposed to the network.
+      - "127.0.0.1:${DB_PORT:-5432}:5432"
+    volumes:
+      - library_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    networks:
+      - library-net
+
+  api:
+    build:
+      context: ./docker/php
+    image: manager-library/php:8.3
+    restart: "no"
+    working_dir: /app
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      APP_ENV: ${APP_ENV:-local}
+      APP_DEBUG: ${APP_DEBUG:-false}
+      APP_KEY: ${APP_KEY:-}
+      LOG_CHANNEL: stderr
+      DB_CONNECTION: pgsql
+      DB_HOST: db
+      DB_PORT: "5432"
+      DB_DATABASE: ${POSTGRES_DB}
+      DB_USERNAME: ${POSTGRES_USER}
+      DB_PASSWORD: ${POSTGRES_PASSWORD}
+      JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET in .env}
+      ADMIN_USERNAME: ${ADMIN_USERNAME:?Set ADMIN_USERNAME in .env}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:?Set ADMIN_PASSWORD in .env}
+      CORS_ORIGIN: ${CORS_ORIGIN:-http://localhost:5173}
+      COVERS_DIR: /app/storage/app/covers
+      PHP_CLI_SERVER_WORKERS: "4"
+    volumes:
+      - ${API_DIR:-../test-manager-library-3145556-api}:/app
+    ports:
+      - "${API_PORT:-8000}:8000"
+    command:
+      - sh
+      - -c
+      - |
+        if [ ! -f artisan ]; then
+          echo "[api] No Laravel project found in the api repository yet."
+          echo "[api] Create it once with the command in README.md (section 'Create the Laravel project')."
+          exit 1
+        fi
+        if [ -z "$$APP_KEY" ]; then
+          echo "[api] APP_KEY is empty. Generate one with:"
+          echo "[api]   docker compose run --rm --no-deps api php artisan key:generate --show"
+          echo "[api] and put it in your .env file."
+          exit 1
+        fi
+        [ -d vendor ] || composer install --no-interaction --prefer-dist
+        php artisan migrate --force
+        php artisan library:bootstrap-admin
+        exec php artisan serve --host=0.0.0.0 --port=8000
+    networks:
+      - library-net
+
+  app:
+    image: node:22-alpine
+    restart: "no"
+    working_dir: /app
+    environment:
+      VITE_API_BASE_URL: ${VITE_API_BASE_URL:-http://localhost:8000/api/v1}
+      CHOKIDAR_USEPOLLING: "true"
+    volumes:
+      - ${APP_DIR:-../test-manager-library-3145556-app}:/app
+      - app_node_modules:/app/node_modules
+    ports:
+      - "${APP_PORT:-5173}:5173"
+    command:
+      - sh
+      - -c
+      - |
+        if [ ! -f package.json ]; then
+          echo "[app] No package.json in the app repository yet. Nothing to serve."
+          exit 1
+        fi
+        npm install --no-audit --no-fund
+        exec npm run dev -- --host 0.0.0.0 --port 5173
+    networks:
+      - library-net
+
+  page:
+    image: nginx:alpine
+    restart: "no"
+    volumes:
+      - ${PAGE_DIR:-../test-manager-library-3145556-page}:/usr/share/nginx/html:ro
+    ports:
+      - "${PAGE_PORT:-8080}:80"
+    networks:
+      - library-net
+
+volumes:
+  library_pgdata:
+  app_node_modules:
+
+networks:
+  library-net:
