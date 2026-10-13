@@ -1,0 +1,9 @@
+# Secrets: the real environment file is never versioned (constitution, Article IX).
+.env
+.env.*
+!.env.example
+
+# Local tooling
+.DS_Store
+Thumbs.db
+*.log
